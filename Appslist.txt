@@ -2,7 +2,7 @@
 #  simply add a # character in front of the specific app in the list below.
 #
 Clipchamp.Clipchamp
-Microsoft.3DBuilder
+# Microsoft.3DBuilder
 Microsoft.549981C3F5F10   #Cortana app
 Microsoft.BingFinance
 Microsoft.BingFoodAndDrink            
@@ -14,16 +14,16 @@ Microsoft.BingTravel
 Microsoft.BingWeather
 Microsoft.Getstarted   # Cannot be uninstalled in Windows 11
 Microsoft.Messaging
-Microsoft.Microsoft3DViewer
+# Microsoft.Microsoft3DViewer
 Microsoft.MicrosoftJournal
 Microsoft.MicrosoftOfficeHub
 Microsoft.MicrosoftPowerBIForWindows
 Microsoft.MicrosoftSolitaireCollection
-Microsoft.MicrosoftStickyNotes
+# Microsoft.MicrosoftStickyNotes
 Microsoft.MixedReality.Portal
-Microsoft.NetworkSpeedTest
+# Microsoft.NetworkSpeedTest
 Microsoft.News
-Microsoft.Office.OneNote
+# Microsoft.Office.OneNote
 Microsoft.Office.Sway
 Microsoft.OneConnect
 Microsoft.Print3D
@@ -32,12 +32,12 @@ Microsoft.Todos
 Microsoft.WindowsAlarms
 Microsoft.WindowsFeedbackHub
 Microsoft.WindowsMaps
-Microsoft.WindowsSoundRecorder
+# Microsoft.WindowsSoundRecorder
 Microsoft.XboxApp   # Old Xbox Console Companion App, no longer supported
 Microsoft.ZuneVideo
 MicrosoftCorporationII.MicrosoftFamily   # Family Safety App
 MicrosoftTeams   # Old MS Teams personal (MS Store)
-MSTeams   # New MS Teams app
+# MSTeams   # New MS Teams app
 
 ACGMediaPlayer
 ActiproSoftwareLLC
@@ -117,7 +117,7 @@ XING
 # The apps below will NOT be uninstalled unless selected during the custom setup selection or when
 #  launching the script with the specific parameters found in the README.md file. 
 #
-#Microsoft.GamingApp                    # Modern Xbox Gaming App, required for installing some PC games
+Microsoft.GamingApp                    # Modern Xbox Gaming App, required for installing some PC games
 #Microsoft.OutlookForWindows            # New mail app: Outlook for Windows
 #Microsoft.People                       # Required for & included with Mail & Calendar
 #Microsoft.PowerAutomateDesktop

@@ -3,6 +3,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param (
     [switch]$Silent,
+    [switch]$Sysprep,
     [switch]$RunAppConfigurator,
     [switch]$RunDefaults, [switch]$RunWin11Defaults,
     [switch]$RemoveApps, 
@@ -11,9 +12,11 @@ param (
     [switch]$RemoveCommApps,
     [switch]$RemoveDevApps,
     [switch]$RemoveW11Outlook,
+    [switch]$ForceRemoveEdge,
     [switch]$DisableDVR,
     [switch]$DisableTelemetry,
     [switch]$DisableBingSearches, [switch]$DisableBing,
+    [switch]$DisableDesktopSpotlight,
     [switch]$DisableLockscrTips, [switch]$DisableLockscreenTips,
     [switch]$DisableWindowsSuggestions, [switch]$DisableSuggestions,
     [switch]$ShowHiddenFolders,
@@ -29,7 +32,14 @@ param (
     [switch]$DisableChat,
     [switch]$HideChat,
     [switch]$ClearStart,
+    [switch]$ClearStartAllUsers,
     [switch]$RevertContextMenu,
+    [switch]$HideHome,
+    [switch]$HideGallery,
+    [switch]$ExplorerToHome,
+    [switch]$ExplorerToThisPC,
+    [switch]$ExplorerToDownloads,
+    [switch]$ExplorerToOneDrive,
     [switch]$DisableOnedrive, [switch]$HideOnedrive,
     [switch]$Disable3dObjects, [switch]$Hide3dObjects,
     [switch]$DisableMusic, [switch]$HideMusic,
@@ -37,6 +47,16 @@ param (
     [switch]$DisableGiveAccessTo, [switch]$HideGiveAccessTo,
     [switch]$DisableShare, [switch]$HideShare
 )
+
+
+# Show error if current powershell environment does not have LanguageMode set to FullLanguage 
+if ($ExecutionContext.SessionState.LanguageMode -ne "FullLanguage") {
+    Write-Host "Error: Win11Debloat is unable to run on your system, powershell execution is restricted by security policies" -ForegroundColor Red
+    Write-Output ""
+    Write-Output "Press enter to exit..."
+    Read-Host | Out-Null
+    Exit
+}
 
 
 # Shows application selection form that allows the user to select what apps they want to remove or keep
@@ -60,6 +80,14 @@ function ShowAppSelectionForm {
     # saveButton eventHandler
     $handler_saveButton_Click= 
     {
+        if ($selectionBox.CheckedItems -contains "Microsoft.WindowsStore" -and -not $Silent) {
+            $warningSelection = [System.Windows.Forms.Messagebox]::Show('Are you sure you wish to uninstall the Microsoft Store? This app cannot easily be reinstalled.', 'Are you sure?', 'YesNo', 'Warning')
+        
+            if ($warningSelection -eq 'No') {
+                return
+            }
+        }
+
         $global:SelectedApps = $selectionBox.CheckedItems
 
         # Create file that stores selected apps if it doesn't exist
@@ -69,6 +97,7 @@ function ShowAppSelectionForm {
 
         Set-Content -Path "$PSScriptRoot/CustomAppsList" -Value $global:SelectedApps
 
+        $form.DialogResult = [System.Windows.Forms.DialogResult]::OK
         $form.Close()
     }
 
@@ -86,23 +115,23 @@ function ShowAppSelectionForm {
     $selectionBox_MouseDown=
     {
         if ($_.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
-            if([System.Windows.Forms.Control]::ModifierKeys -eq [System.Windows.Forms.Keys]::Shift) {
-                if($global:selectionBoxIndex -ne -1) {
+            if ([System.Windows.Forms.Control]::ModifierKeys -eq [System.Windows.Forms.Keys]::Shift) {
+                if ($global:selectionBoxIndex -ne -1) {
                     $topIndex = $global:selectionBoxIndex
 
                     if ($selectionBox.SelectedIndex -gt $topIndex) {
-                        for(($i = ($topIndex)); $i -le $selectionBox.SelectedIndex; $i++){
+                        for (($i = ($topIndex)); $i -le $selectionBox.SelectedIndex; $i++){
                             $selectionBox.SetItemChecked($i, $selectionBox.GetItemChecked($topIndex))
                         }
                     }
                     elseif ($topIndex -gt $selectionBox.SelectedIndex) {
-                        for(($i = ($selectionBox.SelectedIndex)); $i -le $topIndex; $i++){
+                        for (($i = ($selectionBox.SelectedIndex)); $i -le $topIndex; $i++){
                             $selectionBox.SetItemChecked($i, $selectionBox.GetItemChecked($topIndex))
                         }
                     }
                 }
             }
-            elseif($global:selectionBoxIndex -ne $selectionBox.SelectedIndex) {
+            elseif ($global:selectionBoxIndex -ne $selectionBox.SelectedIndex) {
                 $selectionBox.SetItemChecked($selectionBox.SelectedIndex, -not $selectionBox.GetItemChecked($selectionBox.SelectedIndex))
             }
         }
@@ -110,7 +139,7 @@ function ShowAppSelectionForm {
 
     $check_All=
     {
-        for(($i = 0); $i -lt $selectionBox.Items.Count; $i++){
+        for (($i = 0); $i -lt $selectionBox.Items.Count; $i++){
             $selectionBox.SetItemChecked($i, $checkUncheckCheckBox.Checked)
         }
     }
@@ -142,7 +171,7 @@ function ShowAppSelectionForm {
 
             if (-not $jobDone) {
                 # Show error that the script was unable to get list of apps from winget
-                [System.Windows.MessageBox]::Show('Unable to load list of installed apps via winget, some apps may not be displayed in the list.','Error','Ok','Error')
+                [System.Windows.MessageBox]::Show('Unable to load list of installed apps via winget, some apps may not be displayed in the list.', 'Error', 'Ok', 'Error')
             }
             else {
                 # Add output of job (list of apps) to $listOfApps
@@ -151,41 +180,34 @@ function ShowAppSelectionForm {
         }
 
         # Go through appslist and add items one by one to the selectionBox
-        Foreach ($app in (Get-Content -Path $appsFile | Where-Object { $_ -notmatch '^\s*$' } )) { 
+        Foreach ($app in (Get-Content -Path $appsFile | Where-Object { $_ -notmatch '^\s*$' -and $_ -notmatch '^#  .*' -and $_ -notmatch '^# -* #' } )) { 
             $appChecked = $true
 
-            # Remove first # if it exists and set AppChecked to false
+            # Remove first # if it exists and set appChecked to false
             if ($app.StartsWith('#')) {
                 $app = $app.TrimStart("#")
                 $appChecked = $false
             }
+
             # Remove any comments from the Appname
             if (-not ($app.IndexOf('#') -eq -1)) {
                 $app = $app.Substring(0, $app.IndexOf('#'))
             }
-            # Remove any remaining spaces from the Appname
-            if (-not ($app.IndexOf(' ') -eq -1)) {
-                $app = $app.Substring(0, $app.IndexOf(' '))
-            }
-
+            
+            # Remove leading and trailing spaces and `*` characters from Appname
+            $app = $app.Trim()
             $appString = $app.Trim('*')
 
             # Make sure appString is not empty
             if ($appString.length -gt 0) {
                 if ($onlyInstalledCheckBox.Checked) {
                     # onlyInstalledCheckBox is checked, check if app is installed before adding it to selectionBox
-                    if ($listOfApps -like ("*" + $appString + "*")) {
-                        $installed = "installed"
+                    if (-not ($listOfApps -like ("*$appString*")) -and -not (Get-AppxPackage -Name $app)) {
+                        # App is not installed, continue with next item
+                        continue
                     }
-                    elseif (($appString -eq "Microsoft.Edge") -and ($listOfApps -like "* XPFFTQ037JWMHS *")) {
-                        $installed = "installed"
-                    }
-                    else {
-                        $installed = Get-AppxPackage -Name $app
-                    }
-
-                    if ($installed.length -eq 0) {
-                        # App is not installed, continue to next item without adding this app to the selectionBox
+                    if (($appString -eq "Microsoft.Edge") -and -not ($listOfApps -like "* Microsoft.Edge *")) {
+                        # App is not installed, continue with next item
                         continue
                     }
                 }
@@ -211,7 +233,6 @@ function ShowAppSelectionForm {
 
     $button1.TabIndex = 4
     $button1.Name = "saveButton"
-    $button1.DialogResult = [System.Windows.Forms.DialogResult]::OK
     $button1.UseVisualStyleBackColor = $True
     $button1.Text = "Confirm"
     $button1.Location = New-Object System.Drawing.Point(27,472)
@@ -289,35 +310,29 @@ function ShowAppSelectionForm {
 }
 
 
-# Reads list of apps from file and removes them for all user accounts and from the OS image.
-function RemoveAppsFromFile {
+# Returns list of apps from the specified file, it trims the app names and removes any comments
+function ReadAppslistFromFile {
     param (
         $appsFilePath
     )
 
     $appsList = @()
 
-    Write-Output "> Removing default selection of apps..."
-
     # Get list of apps from file at the path provided, and remove them one by one
     Foreach ($app in (Get-Content -Path $appsFilePath | Where-Object { $_ -notmatch '^#.*' -and $_ -notmatch '^\s*$' } )) { 
-        # Remove any spaces before and after the Appname
-        $app = $app.Trim()
-
         # Remove any comments from the Appname
         if (-not ($app.IndexOf('#') -eq -1)) {
             $app = $app.Substring(0, $app.IndexOf('#'))
         }
-        # Remove any remaining spaces from the Appname
-        if (-not ($app.IndexOf(' ') -eq -1)) {
-            $app = $app.Substring(0, $app.IndexOf(' '))
-        }
+
+        # Remove any spaces before and after the Appname
+        $app = $app.Trim()
         
         $appString = $app.Trim('*')
         $appsList += $appString
     }
 
-    RemoveApps $appsList
+    return $appsList
 }
 
 
@@ -333,11 +348,21 @@ function RemoveApps {
         if (($app -eq "Microsoft.OneDrive") -or ($app -eq "Microsoft.Edge")) {
             # Use winget to remove OneDrive and Edge
             if ($global:wingetInstalled -eq $false) {
-                Write-Host "WinGet is either not installed or is outdated, so $app could not be removed" -ForegroundColor Red
+                Write-Host "Error: WinGet is either not installed or is outdated, $app could not be removed" -ForegroundColor Red
             }
             else {
                 # Uninstall app via winget
-                winget uninstall --accept-source-agreements --disable-interactivity --id $app
+                Strip-Progress -ScriptBlock { winget uninstall --accept-source-agreements --disable-interactivity --id $app } | Tee-Object -Variable wingetOutput 
+
+                If (($app -eq "Microsoft.Edge") -and (Select-String -InputObject $wingetOutput -Pattern "Uninstall failed with exit code")) {
+                    Write-Host "Unable to uninstall Microsoft Edge via Winget" -ForegroundColor Red
+                    Write-Output ""
+
+                    if ($( Read-Host -Prompt "Would you like to forcefully uninstall Edge? NOT RECOMMENDED! (y/n)" ) -eq 'y') {
+                        Write-Output ""
+                        ForceRemoveEdge
+                    }
+                }
             }
         }
         else {
@@ -345,10 +370,147 @@ function RemoveApps {
             $app = '*' + $app + '*'
 
             # Remove installed app for all existing users
-            Get-AppxPackage -Name $app -AllUsers | Remove-AppxPackage -AllUsers
+            if ($WinVersion -ge 22000){
+                # Windows 11 build 22000 or later
+                try {
+                    Get-AppxPackage -Name $app -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction Continue
+
+                    if($DebugPreference -ne "SilentlyContinue") {
+                        Write-Host "Removed $app for all users" -ForegroundColor DarkGray
+                    }
+                }
+                catch {
+                    if($DebugPreference -ne "SilentlyContinue") {
+                        Write-Host "Unable to remove $app for all users" -ForegroundColor Yellow
+                        Write-Host $psitem.Exception.StackTrace -ForegroundColor Gray
+                    }
+                }
+            }
+            else {
+                # Windows 10
+                try {
+                    Get-AppxPackage -Name $app | Remove-AppxPackage -ErrorAction SilentlyContinue
+                    
+                    if($DebugPreference -ne "SilentlyContinue") {
+                        Write-Host "Removed $app for current user" -ForegroundColor DarkGray
+                    }
+                }
+                catch {
+                    if($DebugPreference -ne "SilentlyContinue") {
+                        Write-Host "Unable to remove $app for current user" -ForegroundColor Yellow
+                        Write-Host $psitem.Exception.StackTrace -ForegroundColor Gray
+                    }
+                }
+                
+                try {
+                    Get-AppxPackage -Name $app -PackageTypeFilter Main, Bundle, Resource -AllUsers | Remove-AppxPackage -AllUsers -ErrorAction SilentlyContinue
+                    
+                    if($DebugPreference -ne "SilentlyContinue") {
+                        Write-Host "Removed $app for all users" -ForegroundColor DarkGray
+                    }
+                }
+                catch {
+                    if($DebugPreference -ne "SilentlyContinue") {
+                        Write-Host "Unable to remove $app for all users" -ForegroundColor Yellow
+                        Write-Host $psitem.Exception.StackTrace -ForegroundColor Gray
+                    }
+                }
+            }
 
             # Remove provisioned app from OS image, so the app won't be installed for any new users
-            Get-AppxProvisionedPackage -Online | Where-Object { $_.PackageName -like $app } | ForEach-Object { Remove-ProvisionedAppxPackage -Online -AllUsers -PackageName $_.PackageName }
+            try {
+                Get-AppxProvisionedPackage -Online | Where-Object { $_.PackageName -like $app } | ForEach-Object { Remove-ProvisionedAppxPackage -Online -AllUsers -PackageName $_.PackageName }
+            }
+            catch {
+                Write-Host "Unable to remove $app from windows image" -ForegroundColor Yellow
+                Write-Host $psitem.Exception.StackTrace -ForegroundColor Gray
+            }
+        }
+    }
+            
+    Write-Output ""
+}
+
+
+# Forcefully removes Microsoft Edge using it's uninstaller
+function ForceRemoveEdge {
+    # Based on work from loadstring1 & ave9858
+    Write-Output "> Forcefully uninstalling Microsoft Edge..."
+
+    $regView = [Microsoft.Win32.RegistryView]::Registry32
+    $hklm = [Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine, $regView)
+    $hklm.CreateSubKey('SOFTWARE\Microsoft\EdgeUpdateDev').SetValue('AllowUninstall', '')
+
+    # Create stub (Creating this somehow allows uninstalling edge)
+    $edgeStub = "$env:SystemRoot\SystemApps\Microsoft.MicrosoftEdge_8wekyb3d8bbwe"
+    New-Item $edgeStub -ItemType Directory | Out-Null
+    New-Item "$edgeStub\MicrosoftEdge.exe" | Out-Null
+
+    # Remove edge
+    $uninstallRegKey = $hklm.OpenSubKey('SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Microsoft Edge')
+    if ($null -ne $uninstallRegKey) {
+        Write-Output "Running uninstaller..."
+        $uninstallString = $uninstallRegKey.GetValue('UninstallString') + ' --force-uninstall'
+        Start-Process cmd.exe "/c $uninstallString" -WindowStyle Hidden -Wait
+
+        Write-Output "Removing leftover files..."
+
+        $edgePaths = @(
+            "$env:ProgramData\Microsoft\Windows\Start Menu\Programs\Microsoft Edge.lnk",
+            "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\Microsoft Edge.lnk",
+            "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Microsoft Edge.lnk",
+            "$env:APPDATA\Microsoft\Internet Explorer\Quick Launch\User Pinned\TaskBar\Tombstones\Microsoft Edge.lnk",
+            "$env:PUBLIC\Desktop\Microsoft Edge.lnk",
+            "$env:USERPROFILE\Desktop\Microsoft Edge.lnk",
+            "$edgeStub"
+        )
+
+        foreach ($path in $edgePaths){
+            if (Test-Path -Path $path) {
+                Remove-Item -Path $path -Force -Recurse -ErrorAction SilentlyContinue
+                Write-Host "  Removed $path" -ForegroundColor DarkGray
+            }
+        }
+
+        Write-Output "Cleaning up registry..."
+
+        # Remove ms edge from autostart
+        reg delete "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run" /v "MicrosoftEdgeAutoLaunch_A9F6DCE4ABADF4F51CF45CD7129E3C6C" /f *>$null
+        reg delete "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run" /v "Microsoft Edge Update" /f *>$null
+        reg delete "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" /v "MicrosoftEdgeAutoLaunch_A9F6DCE4ABADF4F51CF45CD7129E3C6C" /f *>$null
+        reg delete "HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run" /v "Microsoft Edge Update" /f *>$null
+
+        Write-Output "Microsoft Edge was uninstalled"
+    }
+    else {
+        Write-Output ""
+        Write-Host "Error: Unable to forcefully uninstall Microsoft Edge, uninstaller could not be found" -ForegroundColor Red
+    }
+    
+    Write-Output ""
+}
+
+
+# Execute provided command and strips progress spinners/bars from console output
+function Strip-Progress {
+    param(
+        [ScriptBlock]$ScriptBlock
+    )
+
+    # Regex pattern to match spinner characters and progress bar patterns
+    $progressPattern = 'Γû[Æê]|^\s+[-\\|/]\s+$'
+
+    # Corrected regex pattern for size formatting, ensuring proper capture groups are utilized
+    $sizePattern = '(\d+(\.\d{1,2})?)\s+(B|KB|MB|GB|TB|PB) /\s+(\d+(\.\d{1,2})?)\s+(B|KB|MB|GB|TB|PB)'
+
+    & $ScriptBlock 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            "ERROR: $($_.Exception.Message)"
+        } else {
+            $line = $_ -replace $progressPattern, '' -replace $sizePattern, ''
+            if (-not ([string]::IsNullOrWhiteSpace($line)) -and -not ($line.StartsWith('  '))) {
+                $line
+            }
         }
     }
 }
@@ -362,14 +524,26 @@ function RegImport {
     )
 
     Write-Output $message
-    reg import $path
+
+
+    if (!$global:Params.ContainsKey("Sysprep")) {
+        reg import "$PSScriptRoot\Regfiles\$path"  
+    }
+    else {
+        $defaultUserPath = $env:USERPROFILE.Replace($env:USERNAME, 'Default\NTUSER.DAT')
+        
+        reg load "HKU\Default" $defaultUserPath | Out-Null
+        reg import "$PSScriptRoot\Regfiles\Sysprep\$path"  
+        reg unload "HKU\Default" | Out-Null
+    }
+
     Write-Output ""
 }
 
 
-# Restart the Windows explorer process
+# Restart the Windows Explorer process
 function RestartExplorer {
-    Write-Output "> Restarting Windows explorer to apply all changes. Note: This may cause some flickering."
+    Write-Output "> Restarting Windows Explorer process to apply all changes... (This may cause some flickering)"
 
     # Only restart if the powershell process matches the OS architecture
     # Restarting explorer from a 32bit Powershell window will fail on a 64bit OS
@@ -378,72 +552,83 @@ function RestartExplorer {
         Stop-Process -processName: Explorer -Force
     }
     else {
-        Write-Warning "Unable to restart Windows Explorer, please manually restart your PC to apply all changes."
+        Write-Warning "Unable to restart Windows Explorer process, please manually restart your PC to apply all changes."
     }
 }
 
 
-# Clear all pinned apps from the start menu. 
+# Replace the startmenu for all users, when using the default startmenuTemplate this clears all pinned apps
 # Credit: https://lazyadmin.nl/win-11/customize-windows-11-start-menu-layout/
-function ClearStartMenu {
+function ReplaceStartMenuForAllUsers {
     param (
-        $message
+        $startMenuTemplate = "$PSScriptRoot/Start/start2.bin"
     )
 
-    Write-Output $message
-
-    # Path to start menu template
-    $startmenuTemplate = "$PSScriptRoot/Start/start2.bin"
+    Write-Output "> Removing all pinned apps from the start menu for all users..."
 
     # Check if template bin file exists, return early if it doesn't
-    if (-not (Test-Path $startmenuTemplate)) {
+    if (-not (Test-Path $startMenuTemplate)) {
         Write-Host "Error: Unable to clear start menu, start2.bin file missing from script folder" -ForegroundColor Red
         Write-Output ""
         return
     }
 
-    # Get all user profile folders
-    $usersStartMenu = get-childitem -path "C:\Users\*\AppData\Local\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState"
+    # Get path to start menu file for all users
+    $userPathString = $env:USERPROFILE.Replace($env:USERNAME, "*\AppData\Local\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState")
+    $usersStartMenuPaths = get-childitem -path $userPathString
 
-    # Copy Start menu to all users folders
-    ForEach ($startmenu in $usersStartMenu) {
-        $startmenuBinFile = $startmenu.Fullname + "\start2.bin"
-        $backupBinFile = $startmenuBinFile + ".bak"
-
-        # Check if bin file exists
-        if (Test-Path $startmenuBinFile) {
-            # Backup current startmenu file
-            Move-Item -Path $startmenuBinFile -Destination $backupBinFile
-
-            # Copy template file
-            Copy-Item -Path $startmenuTemplate -Destination $startmenu -Force
-
-            $cpyMsg = "Replaced start menu for user " + $startmenu.Fullname.Split("\")[2]
-            Write-Output $cpyMsg
-        }
-        else {
-            # Bin file doesn't exist, indicating the user is not running the correct version of Windows. Exit function
-            Write-Host "Error: Unable to clear start menu, start2.bin file could not found for user" $startmenu.Fullname.Split("\")[2]  -ForegroundColor Red
-            Write-Output ""
-            return
-        }
+    # Go through all users and replace the start menu file
+    ForEach ($startMenuPath in $usersStartMenuPaths) {
+        ReplaceStartMenu "$($startMenuPath.Fullname)\start2.bin" $startMenuTemplate
     }
 
-    # Also apply start menu template to the default profile
-
-    # Path to default profile
-    $defaultProfile = "C:\Users\default\AppData\Local\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState"
+    # Also replace the start menu file for the default user profile
+    $defaultStartMenuPath = $env:USERPROFILE.Replace($env:USERNAME, 'Default\AppData\Local\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState')
 
     # Create folder if it doesn't exist
-    if (-not(Test-Path $defaultProfile)) {
-        new-item $defaultProfile -ItemType Directory -Force | Out-Null
-        Write-Output "Created LocalState folder for default user"
+    if (-not(Test-Path $defaultStartMenuPath)) {
+        new-item $defaultStartMenuPath -ItemType Directory -Force | Out-Null
+        Write-Output "Created LocalState folder for default user profile"
     }
 
     # Copy template to default profile
-    Copy-Item -Path $startmenuTemplate -Destination $defaultProfile -Force
-    Write-Output "Copied start menu template to default user folder"
+    Copy-Item -Path $startMenuTemplate -Destination $defaultStartMenuPath -Force
+    Write-Output "Replaced start menu for the default user profile"
     Write-Output ""
+}
+
+
+# Replace the startmenu for all users, when using the default startmenuTemplate this clears all pinned apps
+# Credit: https://lazyadmin.nl/win-11/customize-windows-11-start-menu-layout/
+function ReplaceStartMenu {
+    param (
+        $startMenuBinFile = "$env:LOCALAPPDATA\Packages\Microsoft.Windows.StartMenuExperienceHost_cw5n1h2txyewy\LocalState\start2.bin",
+        $startMenuTemplate = "$PSScriptRoot/Start/start2.bin"
+    )
+
+    $userName = $env:USERNAME
+
+    # Check if template bin file exists, return early if it doesn't
+    if (-not (Test-Path $startMenuTemplate)) {
+        Write-Host "Error: Unable to clear start menu, start2.bin file missing from script folder" -ForegroundColor Red
+        return
+    }
+
+    # Check if bin file exists, return early if it doesn't
+    if (-not (Test-Path $startMenuBinFile)) {
+        Write-Host "Error: Unable to clear start menu for user $userName, start2.bin file could not found" -ForegroundColor Red
+        return
+    }
+
+    $backupBinFile = $startMenuBinFile + ".bak"
+
+    # Backup current start menu file
+    Move-Item -Path $startMenuBinFile -Destination $backupBinFile -Force
+
+    # Copy template file
+    Copy-Item -Path $startMenuTemplate -Destination $startMenuBinFile -Force
+
+    Write-Output "Replaced start menu for user $userName"
 }
 
 
@@ -470,7 +655,7 @@ function AddParameter {
     $global:FirstSelection = $false
 
     # Create entry and add it to the file
-    $entry = $parameterName + "#- " + $message
+    $entry = "$parameterName#- $message"
     Add-Content -Path "$PSScriptRoot/SavedSettings" -Value $entry
 }
 
@@ -480,7 +665,14 @@ function PrintHeader {
         $title
     )
 
-    $fullTitle = " Win11Debloat Script - " + $title
+    $fullTitle = " Win11Debloat Script - $title"
+
+    if ($global:Params.ContainsKey("Sysprep")) {
+        $fullTitle = "$fullTitle (Sysprep mode)"
+    }
+    else {
+        $fullTitle = "$fullTitle (User: $Env:UserName)"
+    }
 
     Clear-Host
     Write-Output "-------------------------------------------------------------------------------------------"
@@ -513,7 +705,16 @@ function AwaitKeyToExit {
 }
 
 
- # Check if winget is installed & if it is, check if the version is at least v1.4
+
+##################################################################################################################
+#                                                                                                                #
+#                                                  SCRIPT START                                                  #
+#                                                                                                                #
+##################################################################################################################
+
+
+
+# Check if winget is installed & if it is, check if the version is at least v1.4
 if ((Get-AppxPackage -Name "*Microsoft.DesktopAppInstaller*") -and ((winget -v) -replace 'v','' -gt 1.4)) {
     $global:wingetInstalled = $true
 }
@@ -525,16 +726,16 @@ else {
         Write-Warning "Winget is not installed or outdated. This may prevent Win11Debloat from removing certain apps."
         Write-Output ""
         Write-Output "Press any key to continue anyway..."
-        Read-Host | Out-Null
+        $null = [System.Console]::ReadKey()
     }
 }
 
-# Hide progress bars for app removal, as they block Win11Debloat's output
-$ProgressPreference = 'SilentlyContinue'
+# Get current Windows build version to compare against features
+$WinVersion = Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' CurrentBuild
 
 $global:Params = $PSBoundParameters
 $global:FirstSelection = $true
-$SPParams = 'WhatIf', 'Confirm', 'Verbose', 'Silent'
+$SPParams = 'WhatIf', 'Confirm', 'Verbose', 'Silent', 'Sysprep', 'Debug'
 $SPParamCount = 0
 
 # Count how many SPParams exist within Params
@@ -542,6 +743,32 @@ $SPParamCount = 0
 foreach ($Param in $SPParams) {
     if ($global:Params.ContainsKey($Param)) {
         $SPParamCount++
+    }
+}
+
+# Hide progress bars for app removal, as they block Win11Debloat's output
+if (-not ($global:Params.ContainsKey("Verbose"))) {
+    $ProgressPreference = 'SilentlyContinue'
+}
+else {
+    Read-Host "Verbose mode is enabled, press enter to continue"
+    $ProgressPreference = 'Continue'
+}
+
+if ($global:Params.ContainsKey("Sysprep")) {
+    $defaultUserPath = $env:USERPROFILE.Replace($env:USERNAME, 'Default\NTUSER.DAT')
+
+    # Exit script if default user directory or NTUSER.DAT file cannot be found
+    if (-not (Test-Path "$defaultUserPath")) {
+        Write-Host "Error: Unable to start Win11Debloat in Sysprep mode, cannot find default user folder at '$defaultUserPath'" -ForegroundColor Red
+        AwaitKeyToExit
+        Exit
+    }
+    # Exit script if run in Sysprep mode on Windows 10
+    if ($WinVersion -lt 22000) {
+        Write-Host "Error: Win11Debloat Sysprep mode is not supported on Windows 10" -ForegroundColor Red
+        AwaitKeyToExit
+        Exit
     }
 }
 
@@ -566,7 +793,6 @@ if ($RunAppConfigurator) {
 
     AwaitKeyToExit
 
-    # Exit script
     Exit
 }
 
@@ -594,7 +820,7 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
             }
 
             Write-Output ""
-            Write-Output "(0) Show information about the script"
+            Write-Output "(0) Show more information"
             Write-Output ""
             Write-Output ""
 
@@ -607,7 +833,7 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
 
                 Write-Output ""
                 Write-Output "Press any key to go back..."
-                $null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+                $null = [System.Console]::ReadKey()
             }
             elseif (($Mode -eq '4')-and -not (Test-Path "$PSScriptRoot/SavedSettings")) {
                 $Mode = $null
@@ -650,7 +876,7 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
         '2' { 
             # Get current Windows build version to compare against features
             $WinVersion = Get-ItemPropertyValue 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' CurrentBuild
-
+            
             PrintHeader 'Custom Mode'
 
             # Show options for removing apps, only continue on valid input
@@ -660,37 +886,37 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
                 Write-Host " (1) Only remove the default selection of bloatware apps from 'Appslist.txt'" -ForegroundColor Yellow
                 Write-Host " (2) Remove default selection of bloatware apps, aswell as mail & calendar apps, developer apps and gaming apps"  -ForegroundColor Yellow
                 Write-Host " (3) Select which apps to remove and which to keep" -ForegroundColor Yellow
-                $RemoveCommAppInput = Read-Host "Remove any pre-installed apps? (n/1/2/3)" 
+                $RemoveAppsInput = Read-Host "Remove any pre-installed apps? (n/1/2/3)" 
 
                 # Show app selection form if user entered option 3
-                if ($RemoveCommAppInput -eq '3') {
+                if ($RemoveAppsInput -eq '3') {
                     $result = ShowAppSelectionForm
 
                     if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
-                        # User cancelled or closed app selection, show error and change RemoveCommAppInput so the menu will be shown again
+                        # User cancelled or closed app selection, show error and change RemoveAppsInput so the menu will be shown again
                         Write-Output ""
                         Write-Host "Cancelled application selection, please try again" -ForegroundColor Red
 
-                        $RemoveCommAppInput = 'c'
+                        $RemoveAppsInput = 'c'
                     }
                     
                     Write-Output ""
                 }
             }
-            while ($RemoveCommAppInput -ne 'n' -and $RemoveCommAppInput -ne '0' -and $RemoveCommAppInput -ne '1' -and $RemoveCommAppInput -ne '2' -and $RemoveCommAppInput -ne '3') 
+            while ($RemoveAppsInput -ne 'n' -and $RemoveAppsInput -ne '0' -and $RemoveAppsInput -ne '1' -and $RemoveAppsInput -ne '2' -and $RemoveAppsInput -ne '3') 
 
             # Select correct option based on user input
-            switch ($RemoveCommAppInput) {
+            switch ($RemoveAppsInput) {
                 '1' {
                     AddParameter 'RemoveApps' 'Remove default selection of bloatware apps'
                 }
                 '2' {
                     AddParameter 'RemoveApps' 'Remove default selection of bloatware apps'
-                    AddParameter 'RemoveCommApps' 'Remove the Mail, Calender, and People apps'
+                    AddParameter 'RemoveCommApps' 'Remove the Mail, Calendar, and People apps'
                     AddParameter 'RemoveW11Outlook' 'Remove the new Outlook for Windows app'
                     AddParameter 'RemoveDevApps' 'Remove developer-related apps'
                     AddParameter 'RemoveGamingApps' 'Remove the Xbox App and Xbox Gamebar'
-                    AddParameter 'DisableDVR' 'Disable Xbox game DVR'
+                    AddParameter 'DisableDVR' 'Disable Xbox game/screen recording'
                 }
                 '3' {
                     Write-Output "You have selected $($global:SelectedApps.Count) apps for removal"
@@ -699,8 +925,8 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
 
                     Write-Output ""
 
-                    if ($( Read-Host -Prompt "Disable Xbox game DVR? (y/n)" ) -eq 'y') {
-                        AddParameter 'DisableDVR' 'Disable Xbox game DVR'
+                    if ($( Read-Host -Prompt "Disable Xbox game/screen recording? Also stops gaming overlay popups (y/n)" ) -eq 'y') {
+                        AddParameter 'DisableDVR' 'Disable Xbox game/screen recording'
                     }
                 }
             }
@@ -709,36 +935,59 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
             if ($WinVersion -ge 22621){
                 Write-Output ""
 
-                if ($( Read-Host -Prompt "Remove all pinned apps from the start menu? This applies to all existing and new users and can't be reverted (y/n)" ) -eq 'y') {
-                    AddParameter 'ClearStart' 'Remove all pinned apps from the start menu for new and existing users'
+                if ($global:Params.ContainsKey("Sysprep")) {
+                    if ($( Read-Host -Prompt "Remove all pinned apps from the start menu for all existing and new users? (y/n)" ) -eq 'y') {
+                        AddParameter 'ClearStartAllUsers' 'Remove all pinned apps from the start menu for existing and new users'
+                    }
+                }
+                else {
+                    Do {
+                        Write-Host "Options:" -ForegroundColor Yellow
+                        Write-Host " (n) Don't remove any pinned apps from the start menu" -ForegroundColor Yellow
+                        Write-Host " (1) Remove all pinned apps from the start menu for this user only ($env:USERNAME)" -ForegroundColor Yellow
+                        Write-Host " (2) Remove all pinned apps from the start menu for all existing and new users"  -ForegroundColor Yellow
+                        $ClearStartInput = Read-Host "Remove all pinned apps from the start menu? (n/1/2)" 
+                    }
+                    while ($ClearStartInput -ne 'n' -and $ClearStartInput -ne '0' -and $ClearStartInput -ne '1' -and $ClearStartInput -ne '2') 
+    
+                    # Select correct option based on user input
+                    switch ($ClearStartInput) {
+                        '1' {
+                            AddParameter 'ClearStart' "Remove all pinned apps from the start menu for this user only"
+                        }
+                        '2' {
+                            AddParameter 'ClearStartAllUsers' "Remove all pinned apps from the start menu for all existing and new users"
+                        }
+                    }
                 }
             }
 
             Write-Output ""
 
-            if ($( Read-Host -Prompt "Disable telemetry, diagnostic data, app-launch tracking and targeted ads? (y/n)" ) -eq 'y') {
-                AddParameter 'DisableTelemetry' 'Disable telemetry, diagnostic data & targeted ads'
+            if ($( Read-Host -Prompt "Disable telemetry, diagnostic data, activity history, app-launch tracking and targeted ads? (y/n)" ) -eq 'y') {
+                AddParameter 'DisableTelemetry' 'Disable telemetry, diagnostic data, activity history, app-launch tracking & targeted ads'
             }
 
             Write-Output ""
 
             if ($( Read-Host -Prompt "Disable tips, tricks, suggestions and ads in start, settings, notifications, explorer and lockscreen? (y/n)" ) -eq 'y') {
-                AddParameter 'DisableSuggestions' 'Disable tips, tricks, suggestions and ads in start, settings, notifications and Windows explorer'
+                AddParameter 'DisableSuggestions' 'Disable tips, tricks, suggestions and ads in start, settings, notifications and File Explorer'
+                AddParameter 'DisableDesktopSpotlight' 'Disable the Windows Spotlight desktop background option.'
                 AddParameter 'DisableLockscreenTips' 'Disable tips & tricks on the lockscreen'
             }
 
             Write-Output ""
 
-            if ($( Read-Host -Prompt "Disable & remove bing search, bing AI & cortana in Windows search? (y/n)" ) -eq 'y') {
-                AddParameter 'DisableBing' 'Disable & remove bing search, bing AI & cortana in Windows search'
+            if ($( Read-Host -Prompt "Disable & remove bing web search, bing AI & cortana in Windows search? (y/n)" ) -eq 'y') {
+                AddParameter 'DisableBing' 'Disable & remove bing web search, bing AI & cortana in Windows search'
             }
 
             # Only show this option for Windows 11 users running build 22621 or later
             if ($WinVersion -ge 22621){
                 Write-Output ""
 
-                if ($( Read-Host -Prompt "Disable Windows Copilot? This applies to all users (y/n)" ) -eq 'y') {
-                    AddParameter 'DisableCopilot' 'Disable Windows copilot'
+                if ($( Read-Host -Prompt "Disable and remove Windows Copilot? This applies to all users (y/n)" ) -eq 'y') {
+                    AddParameter 'DisableCopilot' 'Disable and remove Windows Copilot'
                 }
 
                 Write-Output ""
@@ -822,7 +1071,36 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
 
             Write-Output ""
 
-            if ($( Read-Host -Prompt "Do you want to make any changes to Windows explorer? (y/n)" ) -eq 'y') {
+            if ($( Read-Host -Prompt "Do you want to make any changes to File Explorer? (y/n)" ) -eq 'y') {
+                # Show options for changing the File Explorer default location
+                Do {
+                    Write-Output ""
+                    Write-Host "   Options:" -ForegroundColor Yellow
+                    Write-Host "    (n) No change" -ForegroundColor Yellow
+                    Write-Host "    (1) Open File Explorer to 'Home'" -ForegroundColor Yellow
+                    Write-Host "    (2) Open File Explorer to 'This PC'" -ForegroundColor Yellow
+                    Write-Host "    (3) Open File Explorer to 'Downloads'" -ForegroundColor Yellow
+                    Write-Host "    (4) Open File Explorer to 'OneDrive'" -ForegroundColor Yellow
+                    $ExplSearchInput = Read-Host "   Change the default location that File Explorer opens to? (n/1/2/3/4)" 
+                }
+                while ($ExplSearchInput -ne 'n' -and $ExplSearchInput -ne '0' -and $ExplSearchInput -ne '1' -and $ExplSearchInput -ne '2' -and $ExplSearchInput -ne '3' -and $ExplSearchInput -ne '4') 
+
+                # Select correct taskbar search option based on user input
+                switch ($ExplSearchInput) {
+                    '1' {
+                        AddParameter 'ExplorerToHome' "Change the default location that File Explorer opens to 'Home'"
+                    }
+                    '2' {
+                        AddParameter 'ExplorerToThisPC' "Change the default location that File Explorer opens to 'This PC'"
+                    }
+                    '3' {
+                        AddParameter 'ExplorerToDownloads' "Change the default location that File Explorer opens to 'Downloads'"
+                    }
+                    '4' {
+                        AddParameter 'ExplorerToOneDrive' "Change the default location that File Explorer opens to 'OneDrive'"
+                    }
+                }
+
                 Write-Output ""
 
                 if ($( Read-Host -Prompt "   Show hidden files, folders and drives? (y/n)" ) -eq 'y') {
@@ -835,33 +1113,48 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
                     AddParameter 'ShowKnownFileExt' 'Show file extensions for known file types'
                 }
 
+                # Only show this option for Windows 11 users running build 22000 or later
+                if ($WinVersion -ge 22000){
+                    Write-Output ""
+
+                    if ($( Read-Host -Prompt "   Hide the Home section from the File Explorer sidepanel? (y/n)" ) -eq 'y') {
+                        AddParameter 'HideHome' 'Hide the Home section from the File Explorer sidepanel'
+                    }
+
+                    Write-Output ""
+
+                    if ($( Read-Host -Prompt "   Hide the Gallery section from the File Explorer sidepanel? (y/n)" ) -eq 'y') {
+                        AddParameter 'HideGallery' 'Hide the Gallery section from the File Explorer sidepanel'
+                    }
+                }
+
                 Write-Output ""
 
-                if ($( Read-Host -Prompt "   Hide duplicate removable drive entries from the Windows explorer sidepane so they only show under This PC? (y/n)" ) -eq 'y') {
-                    AddParameter 'HideDupliDrive' 'Hide duplicate removable drive entries from the Windows explorer navigation pane'
+                if ($( Read-Host -Prompt "   Hide duplicate removable drive entries from the File Explorer sidepanel so they only show under This PC? (y/n)" ) -eq 'y') {
+                    AddParameter 'HideDupliDrive' 'Hide duplicate removable drive entries from the File Explorer sidepanel'
                 }
 
                 # Only show option for disabling these specific folders for Windows 10 users
                 if (get-ciminstance -query "select caption from win32_operatingsystem where caption like '%Windows 10%'"){
                     Write-Output ""
 
-                    if ($( Read-Host -Prompt "Do you want to hide any folders from the Windows explorer sidepane? (y/n)" ) -eq 'y') {
+                    if ($( Read-Host -Prompt "Do you want to hide any folders from the File Explorer sidepanel? (y/n)" ) -eq 'y') {
                         Write-Output ""
 
-                        if ($( Read-Host -Prompt "   Hide the onedrive folder from the Windows explorer sidepane? (y/n)" ) -eq 'y') {
-                            AddParameter 'HideOnedrive' 'Hide the onedrive folder in the Windows explorer sidepanel'
+                        if ($( Read-Host -Prompt "   Hide the OneDrive folder from the File Explorer sidepanel? (y/n)" ) -eq 'y') {
+                            AddParameter 'HideOnedrive' 'Hide the OneDrive folder in the File Explorer sidepanel'
                         }
 
                         Write-Output ""
                         
-                        if ($( Read-Host -Prompt "   Hide the 3D objects folder from the Windows explorer sidepane? (y/n)" ) -eq 'y') {
-                            AddParameter 'Hide3dObjects' "Hide the 3D objects folder under 'This pc' in Windows explorer" 
+                        if ($( Read-Host -Prompt "   Hide the 3D objects folder from the File Explorer sidepanel? (y/n)" ) -eq 'y') {
+                            AddParameter 'Hide3dObjects' "Hide the 3D objects folder under 'This pc' in File Explorer" 
                         }
                         
                         Write-Output ""
 
-                        if ($( Read-Host -Prompt "   Hide the music folder from the Windows explorer sidepane? (y/n)" ) -eq 'y') {
-                            AddParameter 'HideMusic' "Hide the music folder under 'This pc' in Windows explorer"
+                        if ($( Read-Host -Prompt "   Hide the music folder from the File Explorer sidepanel? (y/n)" ) -eq 'y') {
+                            AddParameter 'HideMusic' "Hide the music folder under 'This pc' in File Explorer"
                         }
                     }
                 }
@@ -919,13 +1212,13 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
                     Write-Output ""
                     Write-Output "Press enter to remove the selected apps or press CTRL+C to quit..."
                     Read-Host | Out-Null
+                    PrintHeader "App Removal"
                 }
             }
             else {
-                Write-Host "Selection was cancelled, no apps have been removed!" -ForegroundColor Red
+                Write-Host "Selection was cancelled, no apps have been removed" -ForegroundColor Red
+                Write-Output ""
             }
-
-            Write-Output ""
         }
 
         # Load custom options selection from the "SavedSettings" file
@@ -936,39 +1229,30 @@ if ((-not $global:Params.Count) -or $RunDefaults -or $RunWin11Defaults -or ($SPP
 
                 # Get & print default settings info from file
                 Foreach ($line in (Get-Content -Path "$PSScriptRoot/SavedSettings" )) { 
-                    # Remove any spaces before and after the Appname
+                    # Remove any spaces before and after the line
                     $line = $line.Trim()
                 
-                    # Check if line has # char, show description, add parameter
+                    # Check if the line contains a comment
                     if (-not ($line.IndexOf('#') -eq -1)) {
-                        Write-Output $line.Substring(($line.IndexOf('#') + 1), ($line.Length - $line.IndexOf('#') - 1))
-                        $paramName = $line.Substring(0, $line.IndexOf('#'))
+                        $parameterName = $line.Substring(0, $line.IndexOf('#'))
 
-                        if ($paramName -eq "RemoveAppsCustom") {
-                            # If paramName is RemoveAppsCustom, check if CustomAppsFile exists
-                            if (Test-Path "$PSScriptRoot/CustomAppsList") {
-                                # Apps file exists, print list of apps
-                                $appsList = @()
-
-                                # Get apps list from file
-                                Foreach ($app in (Get-Content -Path "$PSScriptRoot/CustomAppsList" )) { 
-                                    # Remove any spaces before and after the app name
-                                    $app = $app.Trim()
-
-                                    $appsList += $app
-                                }
-
-                                Write-Host $appsList -ForegroundColor DarkGray
-                            }
-                            else {
-                                # Apps file does not exist, print error and continue to next item
-                                Write-Host "Error: Could not load custom apps list from file, no apps will be removed!" -ForegroundColor Red
+                        # Print parameter description and add parameter to Params list
+                        if ($parameterName -eq "RemoveAppsCustom") {
+                            if (-not (Test-Path "$PSScriptRoot/CustomAppsList")) {
+                                # Apps file does not exist, skip
                                 continue
                             }
+                            
+                            $appsList = ReadAppslistFromFile "$PSScriptRoot/CustomAppsList"
+                            Write-Output "- Remove $($appsList.Count) apps:"
+                            Write-Host $appsList -ForegroundColor DarkGray
+                        }
+                        else {
+                            Write-Output $line.Substring(($line.IndexOf('#') + 1), ($line.Length - $line.IndexOf('#') - 1))
                         }
 
-                        if (-not $global:Params.ContainsKey($ParameterName)){
-                            $global:Params.Add($paramName, $true)
+                        if (-not $global:Params.ContainsKey($parameterName)){
+                            $global:Params.Add($parameterName, $true)
                         }
                     }
                 }
@@ -992,36 +1276,28 @@ else {
 #  or added by the user, and the script can exit without making any changes.
 if ($SPParamCount -eq $global:Params.Keys.Count) {
     Write-Output "The script completed without making any changes."
-    
+
     AwaitKeyToExit
 }
 else {
     # Execute all selected/provided parameters
     switch ($global:Params.Keys) {
         'RemoveApps' {
-            RemoveAppsFromFile "$PSScriptRoot/Appslist.txt" 
+            $appsList = ReadAppslistFromFile "$PSScriptRoot/Appslist.txt" 
+            Write-Output "> Removing default selection of $($appsList.Count) apps..."
+            RemoveApps $appsList
             continue
         }
         'RemoveAppsCustom' {
-            if (Test-Path "$PSScriptRoot/CustomAppsList") {
-                $appsList = @()
-
-                # Get apps list from file
-                Foreach ($app in (Get-Content -Path "$PSScriptRoot/CustomAppsList" )) { 
-                    # Remove any spaces before and after the app name
-                    $app = $app.Trim()
-
-                    $appsList += $app
-                }
-
-                Write-Output "> Removing $($appsList.Count) apps..."
-                RemoveApps $appsList
+            if (-not (Test-Path "$PSScriptRoot/CustomAppsList")) {
+                Write-Host "> Error: Could not load custom apps list from file, no apps were removed" -ForegroundColor Red
+                Write-Output ""
+                continue
             }
-            else {
-                Write-Host "> Could not load custom apps list from file, no apps were removed!" -ForegroundColor Red
-            }
-
-            Write-Output ""
+            
+            $appsList = ReadAppslistFromFile "$PSScriptRoot/CustomAppsList"
+            Write-Output "> Removing $($appsList.Count) apps..."
+            RemoveApps $appsList
             continue
         }
         'RemoveCommApps' {
@@ -1029,148 +1305,175 @@ else {
             
             $appsList = 'Microsoft.windowscommunicationsapps', 'Microsoft.People'
             RemoveApps $appsList
-
-            Write-Output ""
             continue
         }
         'RemoveW11Outlook' {
-            Write-Output "> Removing new Outlook for Windows app..."
-            
             $appsList = 'Microsoft.OutlookForWindows'
+            Write-Output "> Removing new Outlook for Windows app..."
             RemoveApps $appsList
-
-            Write-Output ""
             continue
         }
         'RemoveDevApps' {
-            Write-Output "> Removing developer-related related apps..."
-
             $appsList = 'Microsoft.PowerAutomateDesktop', 'Microsoft.RemoteDesktop', 'Windows.DevHome'
+            Write-Output "> Removing developer-related related apps..."
             RemoveApps $appsList
-
-            Write-Output ""
-
             continue
         }
         'RemoveGamingApps' {
-            Write-Output "> Removing gaming related apps..."
-
             $appsList = 'Microsoft.GamingApp', 'Microsoft.XboxGameOverlay', 'Microsoft.XboxGamingOverlay'
+            Write-Output "> Removing gaming related apps..."
             RemoveApps $appsList
-
-            Write-Output ""
-
+            continue
+        }
+        "ForceRemoveEdge" {
+            ForceRemoveEdge
             continue
         }
         'DisableDVR' {
-            RegImport "> Disabling Xbox game DVR..." $PSScriptRoot\Regfiles\Disable_DVR.reg
+            RegImport "> Disabling Xbox game/screen recording..." "Disable_DVR.reg"
             continue
         }
         'ClearStart' {
-            ClearStartMenu "> Removing all pinned apps from the start menu..."
+            Write-Output "> Removing all pinned apps from the start menu for user $env:USERNAME..."
+            ReplaceStartMenu
+            Write-Output ""
+            continue
+        }
+        'ClearStartAllUsers' {
+            ReplaceStartMenuForAllUsers
             continue
         }
         'DisableTelemetry' {
-            RegImport "> Disabling telemetry, diagnostic data, app-launch tracking and targeted ads..." $PSScriptRoot\Regfiles\Disable_Telemetry.reg
+            RegImport "> Disabling telemetry, diagnostic data, activity history, app-launch tracking and targeted ads..." "Disable_Telemetry.reg"
             continue
         }
         {$_ -in "DisableBingSearches", "DisableBing"} {
-            RegImport "> Disabling bing search, bing AI & cortana in Windows search..." $PSScriptRoot\Regfiles\Disable_Bing_Cortana_In_Search.reg
+            RegImport "> Disabling bing web search, bing AI & cortana in Windows search..." "Disable_Bing_Cortana_In_Search.reg"
             
             # Also remove the app package for bing search
             $appsList = 'Microsoft.BingSearch'
             RemoveApps $appsList
-
-            Write-Output ""
-
+            continue
+        }
+        'DisableDesktopSpotlight' {
+            RegImport "> Disabling the 'Windows Spotlight' desktop background option..." "Disable_Desktop_Spotlight.reg"
             continue
         }
         {$_ -in "DisableLockscrTips", "DisableLockscreenTips"} {
-            RegImport "> Disabling tips & tricks on the lockscreen..." $PSScriptRoot\Regfiles\Disable_Lockscreen_Tips.reg
+            RegImport "> Disabling tips & tricks on the lockscreen..." "Disable_Lockscreen_Tips.reg"
             continue
         }
         {$_ -in "DisableSuggestions", "DisableWindowsSuggestions"} {
-            RegImport "> Disabling tips, tricks, suggestions and ads across Windows..." $PSScriptRoot\Regfiles\Disable_Windows_Suggestions.reg
+            RegImport "> Disabling tips, tricks, suggestions and ads across Windows..." "Disable_Windows_Suggestions.reg"
             continue
         }
         'RevertContextMenu' {
-            RegImport "> Restoring the old Windows 10 style context menu..." $PSScriptRoot\Regfiles\Disable_Show_More_Options_Context_Menu.reg
+            RegImport "> Restoring the old Windows 10 style context menu..." "Disable_Show_More_Options_Context_Menu.reg"
             continue
         }
         'TaskbarAlignLeft' {
-            RegImport "> Aligning taskbar buttons to the left..." $PSScriptRoot\Regfiles\Align_Taskbar_Left.reg
+            RegImport "> Aligning taskbar buttons to the left..." "Align_Taskbar_Left.reg"
+
             continue
         }
         'HideSearchTb' {
-            RegImport "> Hiding the search icon from the taskbar..." $PSScriptRoot\Regfiles\Hide_Search_Taskbar.reg
+            RegImport "> Hiding the search icon from the taskbar..." "Hide_Search_Taskbar.reg"
             continue
         }
         'ShowSearchIconTb' {
-            RegImport "> Changing taskbar search to icon only..." $PSScriptRoot\Regfiles\Show_Search_Icon.reg
+            RegImport "> Changing taskbar search to icon only..." "Show_Search_Icon.reg"
             continue
         }
         'ShowSearchLabelTb' {
-            RegImport "> Changing taskbar search to icon with label..." $PSScriptRoot\Regfiles\Show_Search_Icon_And_Label.reg
+            RegImport "> Changing taskbar search to icon with label..." "Show_Search_Icon_And_Label.reg"
             continue
         }
         'ShowSearchBoxTb' {
-            RegImport "> Changing taskbar search to search box..." $PSScriptRoot\Regfiles\Show_Search_Box.reg
+            RegImport "> Changing taskbar search to search box..." "Show_Search_Box.reg"
             continue
         }
         'HideTaskview' {
-            RegImport "> Hiding the taskview button from the taskbar..." $PSScriptRoot\Regfiles\Hide_Taskview_Taskbar.reg
+            RegImport "> Hiding the taskview button from the taskbar..." "Hide_Taskview_Taskbar.reg"
             continue
         }
         'DisableCopilot' {
-            RegImport "> Disabling Windows copilot..." $PSScriptRoot\Regfiles\Disable_Copilot.reg
+            RegImport "> Disabling & removing Windows Copilot..." "Disable_Copilot.reg"
+
+            # Also remove the app package for bing search
+            $appsList = 'Microsoft.Copilot'
+            RemoveApps $appsList
             continue
         }
         'DisableRecall' {
-            RegImport "> Disabling Windows Recall snapshots..." $PSScriptRoot\Regfiles\Disable_AI_Recall.reg
+            RegImport "> Disabling Windows Recall snapshots..." "Disable_AI_Recall.reg"
             continue
         }
         {$_ -in "HideWidgets", "DisableWidgets"} {
-            RegImport "> Disabling the widget service and hiding the widget icon from the taskbar..." $PSScriptRoot\Regfiles\Disable_Widgets_Taskbar.reg
+            RegImport "> Disabling the widget service and hiding the widget icon from the taskbar..." "Disable_Widgets_Taskbar.reg"
             continue
         }
         {$_ -in "HideChat", "DisableChat"} {
-            RegImport "> Hiding the chat icon from the taskbar..." $PSScriptRoot\Regfiles\Disable_Chat_Taskbar.reg
+            RegImport "> Hiding the chat icon from the taskbar..." "Disable_Chat_Taskbar.reg"
             continue
         }
         'ShowHiddenFolders' {
-            RegImport "> Unhiding hidden files, folders and drives..." $PSScriptRoot\Regfiles\Show_Hidden_Folders.reg
+            RegImport "> Unhiding hidden files, folders and drives..." "Show_Hidden_Folders.reg"
             continue
         }
         'ShowKnownFileExt' {
-            RegImport "> Enabling file extensions for known file types..." $PSScriptRoot\Regfiles\Show_Extensions_For_Known_File_Types.reg
+            RegImport "> Enabling file extensions for known file types..." "Show_Extensions_For_Known_File_Types.reg"
+            continue
+        }
+        'HideHome' {
+            RegImport "> Hiding the home section from the File Explorer navigation pane..." "Hide_Home_from_Explorer.reg"
+            continue
+        }
+        'HideGallery' {
+            RegImport "> Hiding the gallery section from the File Explorer navigation pane..." "Hide_Gallery_from_Explorer.reg"
+            continue
+        }
+        'ExplorerToHome' {
+            RegImport "> Changing the default location that File Explorer opens to `Home`..." "Launch_File_Explorer_To_Home.reg"
+            continue
+        }
+        'ExplorerToThisPC' {
+            RegImport "> Changing the default location that File Explorer opens to `This PC`..." "Launch_File_Explorer_To_This_PC.reg"
+            continue
+        }
+        'ExplorerToDownloads' {
+            RegImport "> Changing the default location that File Explorer opens to `Downloads`..." "Launch_File_Explorer_To_Downloads.reg"
+            continue
+        }
+        'ExplorerToOneDrive' {
+            RegImport "> Changing the default location that File Explorer opens to `OneDrive`..." "Launch_File_Explorer_To_OneDrive.reg"
             continue
         }
         'HideDupliDrive' {
-            RegImport "> Hiding duplicate removable drive entries from the Windows explorer navigation pane..." $PSScriptRoot\Regfiles\Hide_duplicate_removable_drives_from_navigation_pane_of_File_Explorer.reg
+            RegImport "> Hiding duplicate removable drive entries from the File Explorer navigation pane..." "Hide_duplicate_removable_drives_from_navigation_pane_of_File_Explorer.reg"
             continue
         }
         {$_ -in "HideOnedrive", "DisableOnedrive"} {
-            RegImport "> Hiding the onedrive folder from the Windows explorer navigation pane..." $PSScriptRoot\Regfiles\Hide_Onedrive_Folder.reg
+            RegImport "> Hiding the OneDrive folder from the File Explorer navigation pane..." "Hide_Onedrive_Folder.reg"
             continue
         }
         {$_ -in "Hide3dObjects", "Disable3dObjects"} {
-            RegImport "> Hiding the 3D objects folder from the Windows explorer navigation pane..." $PSScriptRoot\Regfiles\Hide_3D_Objects_Folder.reg
+            RegImport "> Hiding the 3D objects folder from the File Explorer navigation pane..." "Hide_3D_Objects_Folder.reg"
             continue
         }
         {$_ -in "HideMusic", "DisableMusic"} {
-            RegImport "> Hiding the music folder from the Windows explorer navigation pane..." $PSScriptRoot\Regfiles\Hide_Music_folder.reg
+            RegImport "> Hiding the music folder from the File Explorer navigation pane..." "Hide_Music_folder.reg"
             continue
         }
         {$_ -in "HideIncludeInLibrary", "DisableIncludeInLibrary"} {
-            RegImport "> Hiding 'Include in library' in the context menu..." $PSScriptRoot\Regfiles\Disable_Include_in_library_from_context_menu.reg
+            RegImport "> Hiding 'Include in library' in the context menu..." "Disable_Include_in_library_from_context_menu.reg"
             continue
         }
         {$_ -in "HideGiveAccessTo", "DisableGiveAccessTo"} {
-            RegImport "> Hiding 'Give access to' in the context menu..." $PSScriptRoot\Regfiles\Disable_Give_access_to_context_menu.reg
+            RegImport "> Hiding 'Give access to' in the context menu..." "Disable_Give_access_to_context_menu.reg"
             continue
         }
         {$_ -in "HideShare", "DisableShare"} {
-            RegImport "> Hiding 'Share' in the context menu..." $PSScriptRoot\Regfiles\Disable_Share_from_context_menu.reg
+            RegImport "> Hiding 'Share' in the context menu..." "Disable_Share_from_context_menu.reg"
             continue
         }
     }
